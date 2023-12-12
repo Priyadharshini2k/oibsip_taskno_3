@@ -1,281 +1,514 @@
-from django.shortcuts import render, redirect, get_object_or_404, HttpResponse
-from PizzaDelivery.models import Pizza
-from StaffPanel.models import AdminOrder
-from django.contrib.auth.models import User, Group
+from django.shortcuts import render, redirect, get_object_or_404
+from django.http import HttpResponse
+from django.contrib.auth import authenticate, login, logout
 from django.contrib import messages
-from django.http import HttpResponseBadRequest
-from django.views.decorators.csrf import csrf_exempt
-from DeliveryApp import settings
-import razorpay, random, collections, datetime
 from . import models
+from OrderHandeling.models import Cart
+from PizzaDelivery import forms
+
+# **************************** Login & Logout ********************************
 
 
-# **************************** Menu ********************************
-def menu(request):
-    pizzas = Pizza.objects.all()
+def staffLoginView(request):
+    return render(request, "staff/staffLogin.html")
+
+
+def staffHomepage(request):
     if request.user.is_authenticated:
-        orders = models.Cart.objects.filter(user=request.user, is_paid=False)
-        order_count = len(orders)
-        context = {
-            'pizzas': pizzas,
-            'order_count':order_count,
-        }
-        return render(request, 'customer/menu.html', context)
+        order_taken = models.AdminOrder.objects.filter(status="order_taken")
+        cancel_orders = models.AdminOrder.objects.filter(status="order_cancelled")
+        delivered_orders = models.AdminOrder.objects.filter(status="order_delivery_in_progress")
+        completed_orders = models.AdminOrder.objects.filter(status="order_completed")
+        contact = models.Contact.objects.all()
 
-    else:
+        order_count = len(order_taken)
+        pizza_count = models.Pizza.objects.all().count()
+        cancel_order_count = len(cancel_orders)
+        delivering_items = len(delivered_orders)
+        completed_orders_count = len(completed_orders)
+        review_count = models.Review.objects.all().count()
+        contact_count = len(contact)
+
         contextlib = {
-            'pizzas': pizzas,
+            'order_count': order_count, 'pizza_count': pizza_count, 'cancel_order_count': cancel_order_count,
+            'delivering_items': delivering_items, 'completed_orders_count': completed_orders_count,
+            'review_count': review_count, 'contact_count':contact_count,
         }
-        return render(request, 'customer/menu.html', contextlib)
 
-
-# *******************************************************************************
-
-
-# **************************** Cart ********************************
-def cart_add(request, pizza_id):
-    pizza = get_object_or_404(Pizza, pk=pizza_id)
-    user = request.user
-    order = models.Cart(user=user, pizza=pizza, quantity=1, price=pizza.price, total_price=pizza.price)
-    order.save()
-    return redirect('menu')
-
-
-def item_clear(request, order_id):
-    pizza = get_object_or_404(Pizza, pk=pizza_id)
-    return redirect("cart_detail")
-
-
-def item_increment(request, order_id):
-    order = get_object_or_404(models.Cart, pk=order_id)
-    order.quantity += 1
-    order.total_price = order.quantity * order.price
-    order.save()
-    return redirect("cart_detail")
-
-
-def item_decrement(request, order_id):
-    order = get_object_or_404(models.Cart, pk=order_id)
-    if order.quantity == 1:
-        order.delete()
+        return render(request, "staff/main/staffHomepage.html", context=contextlib)
     else:
-        order.quantity -= 1
-        order.total_price = order.quantity * order.price
-        order.save()
-    return redirect("cart_detail")
+        messages.add_message(request, messages.ERROR, "Login Required")
+        return redirect('staffLogin')
 
 
-def cart_clear(request):
-    orders = models.Cart.objects.filter(user=request.user)
-    for order in orders:
-        order.delete()
-    return redirect("cart_detail")
+def authenticateStaff(request):
+    username = request.POST['username']
+    password = request.POST['password']
 
-
-def cart_detail(request):
-    orders = models.Cart.objects.filter(user=request.user, is_paid=False)
-    order_count = len(orders)
-
-    ''' Code for avoiding duplicates '''
-    object_list_with_duplicates = [order.pizza for order in orders]
-    duplicate_object_list = [item for item, count in collections.Counter(object_list_with_duplicates).items() if
-                             count > 1]
-    duplicate_dict = collections.Counter(object_list_with_duplicates)
-    new_dict = dict()
-
-    if len(duplicate_object_list) != 0:
-        for item in duplicate_object_list:
-            order = models.Cart.objects.filter(pizza=item)
-            order.delete()
-
-        for item, count in duplicate_dict.items():
-            if count > 1:
-                new_dict[item] = count
-
-        for item, count in new_dict.items():
-            order = models.Cart(user=request.user, pizza=item, quantity=count, price=item.price)
-            order.total_price = int(order.quantity) * int(order.price)
-            order.save()
-
-        context = {
-            'orders': orders,
-            'order_count':order_count,
-        }
-        return render(request, 'customer/cart.html', context)
+    user = authenticate(username=username, password=password)
+    if user is not None:
+        if user.groups.filter(name="Staff").exists():
+            login(request, user)
+            return redirect('staffHomepage')
+        
+        else:
+            messages.add_message(request, messages.ERROR, "User Not Permitted")
+            return redirect('staffLogin')
 
     else:
-        context = {
-            'orders': orders,
-            'order_count': order_count,
-        }
-        return render(request, 'customer/cart.html', context)
+        messages.add_message(request, messages.ERROR, "Invalid Credentials")
+        return redirect('staffLogin')
 
 
-# *******************************************************************************************
+def logoutStaff(request):
+    logout(request)
+    messages.add_message(request, messages.SUCCESS, "Logout Successfully")
+    return redirect('staffLogin')
+
+# ***************************************************************************
+
+# ************************** Contact *******************************
 
 
-# **************************** Checkout ********************************
-
-def checkout(request):
-    if not request.user.is_authenticated:
-        return redirect('login')
-
-    else:
-        orders = models.Cart.objects.filter(user=request.user, is_paid=False)
+def contact(request):
+    if request.user.is_authenticated:
+        orders = Cart.objects.filter(user=request.user, is_paid=False)
         order_count = len(orders)
-        random_num = random.sample(range(1000000, 5000000), 1)
-
-        if request.method == 'POST':
-            order_id = random_num[0]
+        if request.method == "POST":
             name = request.POST['name']
-            address = request.POST['address']
-            city = request.POST['city']
-            state = request.POST['state']
-            zip_code = request.POST['zip_code']
+            email = request.POST['email']
             phone = request.POST['phone']
+            msg = request.POST['msg']
 
             try:
                 mobile = int(phone)
+                contact = models.Contact(name=name, email=email, phone=phone, message=msg)
+                contact.save()
+                messages.success(request, "Message Sent Successfully. We will be replying by mail.")
+                return redirect('contact')
 
             except ValueError:
-                messages.error(request, "Invalid Mobile Number")
-                return redirect('checkout')
-
-            try:
-                pin = int(zip_code)
-
-            except ValueError:
-                messages.error(request, "Invalid Zip Code")
-                return redirect('checkout')
-
-            total_amount = 0
-            for order in orders:
-                order.order_id = order_id
-                order.save()
-                total_amount += order.total_price
-
-            checkout_order = models.Checkout(order_id=order_id, user=request.user, name=name, address=address,
-                                             city=city,
-                                             state=state, zip_code=zip_code, phone=phone, total_amount=total_amount)
-            checkout_order.save()
-
-            razorpay_client =  client = razorpay.Client(auth=(settings.RAZOR_KEY_ID, settings.RAZOR_KEY_SECRET))
-            razorpay_order = razorpay_client.order.create(data=
-                dict(amount=(checkout_order.total_amount * 100), currency='INR', receipt= "order_rcptid_11"))
-            razorpay_order_id = razorpay_order['id']
-            callback_url = 'handlerequest/'
-            contextlib = {
-                'razorpay_order_id': razorpay_order_id,
-                'razorpay_merchant_key': settings.RAZOR_KEY_ID,
-                'razorpay_amount': checkout_order.total_amount,
-                'callback_url': callback_url,
-                'total_amount': total_amount,
-                'orders': orders,
-                'order_count': order_count,
-            }
-
-            return render(request, 'payment/payment_page.html', context=contextlib)
-
-        total_price = 0
-        for order in orders:
-            total_price += order.total_price
+                messages.error(request, "Enter a Valid Mobile Number")
+                return redirect('contact')
 
         contextlib = {
-            'orders':orders,
-            'Total':total_price,
-            'order_count':order_count,
+            'order_count': order_count,
         }
-        return render(request, 'customer/order_checkout.html', contextlib)
-
-
-def go_back_to_cart(request):
-    checkout = models.Checkout.objects.filter(user=request.user)
-    checkout.delete()
-    return redirect("cart_detail")
-
-
-def discount(request):
-    code = request.POST['code']
-    user = request.user
-    orders = models.Cart.objects.filter(user=request.user)
-    try:
-        code_object = get_object_or_404(models.Discount_Code, code=code)
-        code_check = models.Discount_Check.objects.filter(username=user.username)
-        code_applied = []
-
-        if len(code_check) == 0:
-            code_status = models.Discount_Check(username=user.username, code=code, is_applied=True)
-            for order in orders:
-                discount_amount = (order.total_price * code_object.discount) / 100
-                order.total_price = order.total_price - discount_amount
-                order.save()
-            code_status.save()
-            messages.success(request, 'Code Applied Successfully')
-            return redirect('checkout')
-
-
-        for code_user in code_check:
-            if code_user.username == user.username:
-                code_applied.append(code_user.code)
-
-        for code_exist in range(len(code_applied)):
-            if code_applied[code_exist] == code:
-                messages.error(request, 'Code Already Applied')
-                return redirect('checkout')
-
-            else:
-                code_status = models.Discount_Check(username=user.username, code=code, is_applied=True)
-                for order in orders:
-                    discount_amount = (order.total_price * code_object.discount) / 100
-                    order.total_price = order.total_price - discount_amount
-                    order.save()
-                code_status.save()
-                messages.success(request, 'Code Applied Successfully')
-                return redirect('checkout')
-        return redirect('checkout')
-    except Exception as e:
-        print(e)
-        messages.error(request, "Code does not exist")
-        return redirect('checkout')
-# *******************************************************************************
-
-# *********************** Payment Integration *****************************
-@csrf_exempt
-def handlerequest(request):
-    unpaid_orders = models.Cart.objects.filter(user=request.user, is_paid=False)
-    total_amount = 0
-    for order in unpaid_orders:
-        total_amount += order.total_price
+        return render(request, 'customer/contact.html', context=contextlib)
 
     if request.method == "POST":
+        name = request.POST['name']
+        email = request.POST['email']
+        phone = request.POST['phone']
+        msg = request.POST['msg']
+
         try:
-            now = datetime.datetime.now()
+            mobile = int(phone)
+            contact = models.Contact(name=name, email=email, phone=phone, message=msg)
+            contact.save()
+            messages.success(request, "Message Sent Successfully. We will be replying by mail.")
+            return redirect('contact')
 
-            dt_string = now.strftime("%d/%m/%Y %H:%M:%S")
+        except ValueError:
+            messages.error(request, "Enter a Valid Mobile Number")
+            return redirect('contact')
 
-            for order in unpaid_orders:
-                order.is_paid = True
-                order.order_status = "order_taken"
-                order.save()
+    return render(request, 'customer/contact.html')
 
-            paid_orders = models.Cart.objects.filter(is_paid=True)
-            pizzas = [x.pizza for x in paid_orders]
-            admin_order = AdminOrder()
-            admin_order.user = request.user
-            admin_order.order_id = paid_orders[0].order_id
-            admin_order.status = "order_taken"
-            admin_order.timestamp = dt_string
-            admin_order.total_amount = total_amount
-            admin_order.save()
-            for pizza in pizzas:
-                admin_order.pizza.add(pizza)
 
-            return redirect('review')
+def contactList(request):
+    contact_list = models.Contact.objects.all()
+    cotact_count = len(contact_list)
+    contextlib = {
+        'contact_list': contact_list,
+        'contact_count': cotact_count,
+    }
+    return render(request, 'staff/main/contact.html', context=contextlib)
 
-        except:
-            return render(request, 'payment/order_failure.html')
+
+def deleteContact(request, contact_id):
+    contact = get_object_or_404(models.Contact, pk=contact_id)
+    contact.delete()
+    return redirect('contact_list')
+
+# ***************************************************************************
+
+# *************************** Pizza Operations ******************************
+
+
+def addPizza(request):
+    if request.user.is_authenticated:
+        context = {}
+        if request.method == "POST":
+            form = forms.PizzaForm(request.POST, request.FILES)
+            if form.is_valid():
+                name = form.cleaned_data.get("name")
+                price = form.cleaned_data.get("price")
+                description = form.cleaned_data.get("description")
+                img = form.cleaned_data.get("image")
+                obj = models.Pizza.objects.create(
+                    name=name,
+                    price=price,
+                    description=description,
+                    image=img
+                )
+                obj.save()
+                return redirect('viewPizza')
+        else:
+            form = forms.PizzaForm()
+        context['form'] = form
+        return render(request, "pizza/addForm.html", context)
+    else:
+        messages.add_message(request, messages.ERROR, "Login Required")
+        return redirect('staffLogin')
+
+
+def viewPizza(request):
+    if request.user.is_authenticated:
+        pizzas = models.Pizza.objects.all()
+        return render(request, 'pizza/pizzaList.html', {'pizzas': pizzas})
+    else:
+        messages.add_message(request, messages.ERROR, "Login Required")
+        return redirect('staffLogin')
+
+
+def operationsPizza(request, pizza_id):
+    if request.user.is_authenticated:
+        if request.method == 'POST':
+            if request.POST.get('delete'):
+                pizza = get_object_or_404(models.Pizza, pk=pizza_id)
+                pizza.delete()
+                return redirect('viewPizza')
+
+            if request.POST.get('update'):
+                pizza = get_object_or_404(models.Pizza, pk=pizza_id)
+                return render(request, 'pizza/updatePizza.html', {'pizza_id': pizza_id, 'pizza': pizza})
+    else:
+        messages.add_message(request, messages.ERROR, "Login Required")
+        return redirect('staffLogin')
+
+
+def updatePizza(request, pizza_id):
+    if request.user.is_authenticated:
+        pizza = get_object_or_404(models.Pizza, pk=pizza_id)
+        pizza.name = request.POST['name']
+        pizza.price = request.POST['price']
+        pizza.description = request.POST['description']
+        pizza.save()
+        return redirect('viewPizza')
+    else:
+        messages.add_message(request, messages.ERROR, "Login Required")
+        return redirect('staffLogin')
+
+
+# ************************************************************************
+
+# *********************** Order Management *******************************
+
+def orderHistory(request):
+    if request.user.is_authenticated:
+        cart_item = Cart.objects.filter(user=request.user, is_paid=False)
+        order_count = len(cart_item)
+        try:
+            orders = models.AdminOrder.objects.filter(user=request.user)
+            count = len(orders)
+
+            contextlib = {
+                'orders': orders,
+                'order_len': count,
+                'order_count': order_count
+            }
+            return render(request, 'customer/order_history.html', context=contextlib)
+
+        except Exception as e:
+            print(e)
+            return redirect('home')
 
     else:
-        return HttpResponseBadRequest()
+        return redirect('login')
 
-# *******************************************************************************
+
+def orderTracking(request):
+    if request.user.is_authenticated:
+        cart_item = Cart.objects.filter(user=request.user, is_paid=False)
+        order_count = len(cart_item)
+        if request.method == "POST":
+            order_id = request.POST['order_id']
+
+            try:
+                order_int_id = int(order_id)
+                try:
+                    order = get_object_or_404(models.AdminOrder, order_id=order_id)
+                    contextlib = {
+                        'order': order,
+                        'order_count':order_count,
+                    }
+                    return render(request, 'customer/order_tracking.html', context=contextlib)
+
+                except Exception as e:
+                    print(e)
+                    messages.error(request, "Order ID not found")
+                    return redirect('order_tracking')
+
+            except ValueError:
+                messages.error(request, "Invalid Order ID")
+                return redirect('order_tracking')
+
+        contextlib = {
+            'order_count': order_count,
+        }
+        return render(request, 'customer/order_tracking_form.html', context=contextlib)
+
+    else:
+        if request.method == "POST":
+            order_id = request.POST['order_id']
+
+            try:
+                order_int_id = int(order_id)
+                try:
+                    order = get_object_or_404(models.AdminOrder, order_id=order_id)
+                    contextlib = {
+                        'order': order,
+                    }
+                    return render(request, 'customer/order_tracking.html', context=contextlib)
+
+                except Exception as e:
+                    print(e)
+                    messages.error(request, "Order ID not found")
+                    return redirect('order_tracking')
+
+            except ValueError:
+                messages.error(request, "Invalid Order ID")
+                return redirect('order_tracking')
+        return render(request, 'customer/order_tracking_form.html')
+
+
+def orderList(request):
+    order_list = models.AdminOrder.objects.all()
+    order_count = len(order_list)
+    try:
+        contextlib = {
+            'orders': order_list,
+            'order_count': order_count,
+        }
+        return render(request, 'staff/main/orders.html', context=contextlib)
+
+    except Exception as e:
+        return HttpResponse(e)
+
+
+def statusUpdate(request, order_id):
+    if request.method == "POST":
+        try:
+            if 'update' in request.POST:
+                order_status = get_object_or_404(models.AdminOrder, order_id=order_id)
+                contextlib = {
+                    'order_status': order_status,
+                    'order_id': order_id
+                }
+
+                return render(request, 'staff/main/order_status.html', context=contextlib)
+
+            if 'delete' in request.POST:
+                order = get_object_or_404(models.AdminOrder, order_id=order_id)
+                order.delete()
+                return redirect('orders')
+
+        except Exception as e:
+            return HttpResponse(e)
+
+
+def orderStatusUpdate(request, order_id):
+    if request.method == "POST":
+        order = get_object_or_404(models.AdminOrder, order_id=order_id)
+        cart = Cart.objects.filter(order_id=order_id)
+
+        order_status = request.POST['order_status']
+        for cart_obj in cart:
+            cart_obj.order_status = order_status
+            cart_obj.save()
+
+        order.status = order_status
+        order.save()
+        return redirect('orders')
+
+
+def orderCancel(request):
+    if request.user.is_authenticated:
+        if request.method == "POST":
+            order_id = request.POST['order_id']
+            name = request.POST['name']
+            account_no = request.POST['account_no']
+            email = request.POST['email']
+            mobile = request.POST['mobile_no']
+
+            try:
+                valid_acc = int(account_no)
+                valid_mobile = int(mobile)
+                valid_order = int(order_id)
+
+                try:
+                    order = get_object_or_404(models.AdminOrder, order_id=order_id)
+                    order.status = 'order_cancelled'
+                    order.save()
+
+                    cancel_order = models.CancelOrder(order=order, name=name, account_no=account_no, email=email,
+                                                      mobile_no=mobile, is_returned=False)
+                    cancel_order.save()
+                    messages.success(request, "Order Cancelled Succesfully.")
+                    return redirect('order_cancel')
+
+                except Exception as e:
+                    print(e)
+                    messages.error(request, "Order Not Found. Please Enter Valid Order ID.")
+                    return redirect('order_cancel')
+
+            except ValueError:
+                messages.error(request, "Please Enter Numbers in Number Inputs.")
+                return redirect('order_cancel')
+
+        else:
+            cart_item = Cart.objects.filter(user=request.user, is_paid=False)
+            order_count = len(cart_item)
+            contextlib = {
+                'order_count':order_count,
+            }
+            return render(request, 'payment/order_cancel_form.html', context=contextlib)
+
+    if request.method == "POST":
+        order_id = request.POST['order_id']
+        name = request.POST['name']
+        account_no = request.POST['account_no']
+        email = request.POST['email']
+        mobile = request.POST['mobile_no']
+
+        order = get_object_or_404(models.AdminOrder, order_id=order_id)
+        order.status = 'order_cancelled'
+        order.save()
+
+        cancel_order = models.CancelOrder(order=order, name=name, account_no=account_no, email=email,
+                                          mobile_no=mobile, is_returned=False)
+        cancel_order.save()
+        return redirect('order_cancel')
+
+    else:
+        return render(request, 'payment/order_cancel_form.html')
+
+
+def cancelRequests(request):
+    orders = models.CancelOrder.objects.all()
+    cancel_count = len(orders)
+    contextlib = {
+        'orders': orders,
+        'cancel_count': cancel_count,
+    }
+    return render(request, 'staff/main/order_cancel_request.html', context=contextlib)
+
+
+def deleteCancelRequest(request, order_id):
+    if 'update' in request.POST:
+        order = get_object_or_404(models.CancelOrder, pk=order_id)
+        order.is_returned = True
+        order.save()
+        return redirect('order_cancel_request_list')
+
+    if 'delete' in request.POST:
+        order = get_object_or_404(models.CancelOrder, pk=order_id)
+        main_order = get_object_or_404(models.AdminOrder, order_id=order.order.order_id)
+        main_order.status = 'order_deleted'
+        main_order.save()
+        order.delete()
+        return redirect('order_cancel_request_list')
+
+
+# **********************************************************************
+
+# ********************** Customer Review ********************************
+def review(request):
+    if request.user.is_authenticated:
+            cart_item = Cart.objects.filter(user=request.user, is_paid=False)
+            order_count = len(cart_item)
+            if request.method == "POST":
+                rating_star = request.POST['ratings']
+                feedback = request.POST['feedback']
+                rating = 0
+                if rating_star == "star1":
+                    rating = 5
+
+                elif rating_star == "star2":
+                    rating = 4
+
+                elif rating_star == "star3":
+                    rating = 3
+
+                elif rating_star == "star4":
+                    rating = 2
+
+                elif rating_star == "star5":
+                    rating = 1
+
+                try:
+                    feedback = models.Review(user=request.user, ratings=rating, feedback=feedback)
+                    feedback.save()
+                    messages.success(request, 'Feedback Sent Successfully')
+                    return redirect('home')
+
+                except Exception as e:
+                    print(e)
+                    return redirect('review')
+
+            contextlib = {
+                'order_count':order_count,
+            }
+            return render(request, 'payment/order_success.html', context=contextlib)
+
+    if request.method == "POST":
+        rating_star = request.POST['ratings']
+        feedback = request.POST['feedback']
+        rating = 0
+        if rating_star == "star1":
+            rating = 5
+
+        elif rating_star == "star2":
+            rating = 4
+
+        elif rating_star == "star3":
+            rating = 3
+
+        elif rating_star == "star4":
+            rating = 2
+
+        elif rating_star == "star5":
+            rating = 1
+
+        try:
+            feedback = models.Review(user=request.user, ratings=rating, feedback=feedback)
+            feedback.save()
+            messages.success(request, 'Feedback Sent Successfully')
+            return redirect('home')
+
+        except Exception as e:
+            print(e)
+            return redirect('review')
+    return render(request, 'payment/order_success.html')
+
+
+def reviewList(request):
+    review_list = models.Review.objects.all()
+    review_count = len(review_list)
+
+    contextlib = {
+        'reviews': review_list,
+        'review_count': review_count,
+
+    }
+    return render(request, 'staff/main/reviews.html', context=contextlib)
+
+
+def deleteReview(request, review_id):
+    review = get_object_or_404(models.Review, pk=review_id)
+    review.delete()
+    return redirect('review_list')
+
+
+# **************************************************************
